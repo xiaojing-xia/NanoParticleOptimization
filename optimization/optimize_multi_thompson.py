@@ -224,7 +224,7 @@ def run_jobs(fw_ids):
 
 def monitor(fw_ids):
     '''monitor status of submitted jobs by looking up the fw_id'''
-    LAUNCH_STORE.connect()
+    FWS_STORE.connect()
     all_done = [False] * len(fw_ids)
     runtimes = [-1] * len(fw_ids) 
     
@@ -234,8 +234,8 @@ def monitor(fw_ids):
         running_count = 0
         while not done:
             # publisher has a 60s sleep. give it 120s to be safe...
-            for j in range(1200):
-                launch = LAUNCH_STORE.query({'fw_id': fw_id})
+            for j in range(4200):
+                launch = FWS_STORE.query({'fw_id': fw_id})
                 launch = list(launch)
                 if len(launch) == 0:
                     time.sleep(1)
@@ -248,12 +248,13 @@ def monitor(fw_ids):
             if launch['state'] == 'COMPLETED':
                 done = True
                 all_done[i] = True
-                time_start = convert_time(launch['time_start'])
-                time_end = convert_time(launch['time_end'])
-                runtime = time_end - time_start
+                #time_start = convert_time(launch['time_start'])
+                #time_end = convert_time(launch['time_end'])
+                #runtime = time_end - time_start
                 # NOTE(xxia): the time at fw is UTC, which is different from local clock
-                print(f"job {fw_id} ended at {launch['time_end']}. took {runtime} seconds.")
-                runtimes[i] = runtime
+                #print(f"job {fw_id} ended at {launch['time_end']}. took {runtime} seconds.")
+                print(f"job {fw_id} ended")
+                #runtimes[i] = runtime
                 
             elif launch['state'] == 'READY':
                 print(f"time: {datetime.fromtimestamp(time.time())}: {fw_id} ready! Waiting to start. "
@@ -280,7 +281,7 @@ def monitor(fw_ids):
             else:
                 raise RuntimeError(f"unknown state: {launch['state']}") 
 
-    return all_done, runtimes
+    return all_done
 
 
 def get_results(all_done, fw_ids, from_cloud=True):
@@ -478,8 +479,8 @@ def run_study():
         train_x, train_y, best_y = get_data_botorch(DATA_DEST, from_cloud=from_cloud)
         
         encode_inputs(train_x)
-        candidates = recommend(train_x, train_y, best_y, bounds)
-        # candidates = thompson_sample(train_x, train_y, 1, 1)
+        # candidates = recommend(train_x, train_y, best_y, bounds)
+        candidates = thompson_sampling(train_x, train_y, 10, 20)
         print(f"recommending: {candidates}")
         decode_candidates(candidates)
         print(f"actual recommended recipe: {candidates}")
@@ -489,7 +490,7 @@ def run_study():
         # sample data for a quick test
         # fw_ids = [2738, 2739, 2740, 2741, 2742, 2743, 2744, 2745]
         
-        all_done, runtimes = monitor(fw_ids)
+        all_done = monitor(fw_ids)
         print(f"submitted {len(fw_ids)} jobs. sucessfully completed {sum(all_done)}.")
         for done, fw_id in zip(all_done, fw_ids):
             if done:

@@ -59,7 +59,6 @@ LP = LaunchPad.from_file(LP_FILE)
 DOCS_STORE = MongoStore.from_launchpad_file(LP_FILE, 'test_fws_npmc')
 DATA_STORE = MongoStore.from_launchpad_file(LP_FILE, 'test_docs_npmc')
 LAUNCH_STORE = MongoStore.from_launchpad_file(LP_FILE, 'launches')
-FWS_STORE = MongoStore.from_launchpad_file(LP_FILE, 'fireworks')
 
 DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
 
@@ -409,7 +408,7 @@ def recommend(train_x, train_y, best_y, bounds, n_trails = 1):
     # hyperparameters are super sensitive here
     candidates, _ = optimize_acqf(acq_function = EI,
                                  bounds = bounds, 
-                                 q = 1, 
+                                 q = 10, 
                                  num_restarts = 200, 
                                  raw_samples = 412, 
                                  options = {'batch_limit': 5, "maxiter": 200}
