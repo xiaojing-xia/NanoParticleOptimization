@@ -228,13 +228,13 @@ def monitor(fw_ids):
     all_done = [False] * len(fw_ids)
     runtimes = [-1] * len(fw_ids) 
     
-    for i, fw_id in enumerate(fw_ids):
+    for i, fw_id in reversed(list(enumerate(fw_ids))):
         done = all_done[i]
         ready_count = 0
         running_count = 0
         while not done:
             # publisher has a 60s sleep. give it 120s to be safe...
-            for j in range(4200):
+            for j in range(1200):
                 launch = FWS_STORE.query({'fw_id': fw_id})
                 launch = list(launch)
                 if len(launch) == 0:
@@ -260,8 +260,8 @@ def monitor(fw_ids):
                 print(f"time: {datetime.fromtimestamp(time.time())}: {fw_id} ready! Waiting to start. "
                       f"Been {ready_count} minutes!")
                 ready_count += 1
-                # check for 1hr
-                if ready_count > 60:
+                # check for 2hr
+                if ready_count > 120:
                     raise RuntimeError(f"{fw_id} failed to start in {ready_count + 1} minutes!")
                 time.sleep(60)
                 
