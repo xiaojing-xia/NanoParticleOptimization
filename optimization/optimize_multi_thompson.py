@@ -227,11 +227,11 @@ def monitor(fw_ids):
     FWS_STORE.connect()
     all_done = [False] * len(fw_ids)
     runtimes = [-1] * len(fw_ids) 
-    
+    running_count = 0
     for i, fw_id in reversed(list(enumerate(fw_ids))):
         done = all_done[i]
         ready_count = 0
-        running_count = 0
+        
         while not done:
             # publisher has a 60s sleep. give it 120s to be safe...
             for j in range(1200):
