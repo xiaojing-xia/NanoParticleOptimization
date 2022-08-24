@@ -1,0 +1,9 @@
+host: mongodb05.nersc.gov
+port: 27017
+name: 'fw_xxia_npmc'
+username: 'fw_xxia_npmc_admin'
+password: 'Imxia1130!LBNL'
+logdir: null
+Istrm_lvl: DEBUG
+unser_indices: []
+wf_user_indices: []
