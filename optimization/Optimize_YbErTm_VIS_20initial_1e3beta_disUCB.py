@@ -8,6 +8,7 @@ import math
 import numpy as np
 import os
 import pandas as pd
+import pickle
 import sys
 import time
 
@@ -26,10 +27,12 @@ import gpytorch
 import gpytorch.settings as gpts
 import pykeops
 from botorch.acquisition.monte_carlo import qExpectedImprovement
+from botorch.acquisition import UpperConfidenceBound
 from botorch.fit import fit_gpytorch_model
 from botorch.generation import MaxPosteriorSampling
 from botorch.models import SingleTaskGP, ModelListGP
 from botorch.optim import optimize_acqf
+from botorch.optim import optimize_acqf_discrete_local_search
 from botorch.test_functions import Hartmann
 from botorch.utils.transforms import unnormalize
 from gpytorch.constraints import Interval
@@ -49,7 +52,6 @@ from common import configs
 from common import gcloud_utils
 
 seed_generator = seed_generator.SeedGenerator()
-
 # credential
 GSPREAD_CRED = './common/sustained-spark-354104-2f5a40769608.json'
 GSPREAD_NAME = 'simulation_log.csv'
@@ -71,6 +73,33 @@ RANGES = {'UV': [300, 450],
           'TOTAL': [200, 900],
           'ABSORPTION': [950, 1030],
          }
+
+LOG_DEST = "../saved_data/fws_YbErTm_VIS_10initial_beta=1e3_disUCB.csv"
+FLAG_DEST = "../saved_data/flag_YbErTm_VIS_10initial_beta=1e3_disUCB.csv"
+def check_last_run():
+    from_cloud = configs.cfg["from_cloud"]
+    FLAG = read_flag()
+    if FLAG == -1:
+        fw_ids = pd.read_csv(LOG_DEST, header = None).values.tolist()[0]
+        all_done = monitor(fw_ids)
+        print(f"submitted {len(fw_ids)} jobs. sucessfully completed {sum(all_done)}.")
+        for done, fw_id in zip(all_done, fw_ids):
+            if done:
+                print(f"{fw_id} done")
+            else:
+                print(f"{fw_id} failed")
+        get_results(all_done, fw_ids, from_cloud=from_cloud)
+        
+def write_flag(FLAG):
+    df = pd.DataFrame(FLAG)
+    df.to_csv(FLAG_DEST,header = None, index=False)
+    
+def read_flag():
+    return pd.read_csv(FLAG_DEST, header = None).values.tolist()[0][0]
+    
+def log_fws(fws):
+    df = pd.DataFrame([fws]) 
+    df.to_csv(LOG_DEST,header = None, index=False)
 
 def encode_inputs(x_arr, x_max = 34):
     '''encode simulation input to botorch'''
@@ -125,7 +154,9 @@ def convert_time(time_str):
 
 def get_data_botorch(data_file, from_cloud = True):
     if from_cloud:
+        #df=pd.read_csv('../saved_data/UV_log_shuffled_10initial_test1.csv', sep=',')
         df = gcloud_utils.get_df_gspread(GSPREAD_CRED, GSPREAD_NAME)
+        #df = df.drop(labels=range(1, 570), axis=0)
         my_data = df.to_numpy()
         print(f"reading data log from google sheet: {GSPREAD_NAME}!")
     else:
@@ -133,9 +164,9 @@ def get_data_botorch(data_file, from_cloud = True):
         print(f"reading data log from local: {data_file}!")
 
     # features
-    train_x = torch.from_numpy(my_data[:, :5])
+    train_x = torch.from_numpy(my_data[:, :7])
     # labels
-    train_y = torch.from_numpy(my_data[:, 5]).unsqueeze(-1)
+    train_y = torch.from_numpy(my_data[:, 8]).unsqueeze(-1)
     # best observation
     best_y = train_y.max().item()
     
@@ -228,6 +259,7 @@ def monitor(fw_ids):
     all_done = [False] * len(fw_ids)
     runtimes = [-1] * len(fw_ids) 
     running_count = 0
+    reserved_count = 0
     for i, fw_id in reversed(list(enumerate(fw_ids))):
         done = all_done[i]
         ready_count = 0
@@ -261,7 +293,7 @@ def monitor(fw_ids):
                       f"Been {ready_count} minutes!")
                 ready_count += 1
                 # check for 2hr
-                if ready_count > 120:
+                if ready_count > 180:
                     raise RuntimeError(f"{fw_id} failed to start in {ready_count + 1} minutes!")
                 time.sleep(60)
                 
@@ -269,7 +301,7 @@ def monitor(fw_ids):
                 print(f"time: {datetime.fromtimestamp(time.time())}: {fw_id} still running! Been {running_count + 1} minutes!")
                 running_count += 1
                 # check for 2hrs
-                if running_count > 120:
+                if running_count > 1200:
                     print(f"{fw_id} failed to complete in {running_count + 1} minutes!")
                     break # break the while loop
                 time.sleep(60)
@@ -277,7 +309,16 @@ def monitor(fw_ids):
             elif launch['state'] == 'FIZZLED':
                 print(f"something went wrong in {fw_id}! Fizzled.") 
                 break
-                
+            
+            elif launch['state'] == 'RESERVED':
+                print(f"time: {datetime.fromtimestamp(time.time())}: {fw_id} reserved! Waiting to start. "
+                      f"Been {ready_count} minutes!")
+                reserved_count += 1
+                # check for 2hr
+                if reserved_count > 180:
+                    raise RuntimeError(f"{fw_id} failed to start in {ready_count + 1} minutes!")
+                time.sleep(60)
+             
             else:
                 raise RuntimeError(f"unknown state: {launch['state']}") 
 
@@ -307,17 +348,23 @@ def get_results(all_done, fw_ids, from_cloud=True):
                 data = {}
                 data['yb_1'] = 0
                 data['er_1'] = 0
+                data['tm_1'] = 0
                 data['yb_2'] = 0
                 data['er_2'] = 0
+                data['tm_2'] = 0
                 for dopant in doc['data']['input']['dopant_specifications']:
                     if dopant[0] == 0 and dopant[2] == 'Yb':
                         data['yb_1'] = dopant[1]
                     if dopant[0] == 0 and dopant[2] == 'Er':
                         data['er_1'] = dopant[1]
+                    if dopant[0] == 0 and dopant[2] == 'Tm':
+                        data['tm_1'] = dopant[1]
                     if dopant[0] == 1 and dopant[2] == 'Yb':
                         data['yb_2'] = dopant[1]
                     if dopant[0] == 1 and dopant[2] == 'Er':
                         data['er_2'] = dopant[1]
+                    if dopant[0] == 1 and dopant[2] == 'Tm':
+                        data['tm_2'] = dopant[1]
 
                 data['radius'] = doc['data']['input']['constraints'][0]['radius']
 
@@ -357,26 +404,32 @@ def get_results(all_done, fw_ids, from_cloud=True):
         log = gcloud_utils.get_df_gspread(GSPREAD_CRED, GSPREAD_NAME)
     print("all loop results sucessfully appended!")
     print("current total number of results:", len(log))
-    print("current best UV:", log["UV"].max())
+    print("current best VIS:", log["VIS"].max())
     print("current best structure:")
-    print(log.iloc[log["UV"].idxmax(), :5].to_string(index=True))
+    print(log.iloc[log["VIS"].idxmax(), :7].to_string(index=True))
 
                          
 def append_data_to_csv(doc):
     data = {}
     data['yb_1'] = 0
     data['er_1'] = 0
+    data['tm_1'] = 0
     data['yb_2'] = 0
     data['er_2'] = 0
+    data['tm_2'] = 0
     for dopant in doc['data']['input']['dopant_specifications']:
         if dopant[0] == 0 and dopant[2] == 'Yb':
             data['yb_1'] = dopant[1]
         if dopant[0] == 0 and dopant[2] == 'Er':
             data['er_1'] = dopant[1]
+        if dopant[0] == 1 and dopant[2] == 'Tm':
+            data['tm_1'] = dopant[1]
         if dopant[0] == 1 and dopant[2] == 'Yb':
             data['yb_2'] = dopant[1]
         if dopant[0] == 1 and dopant[2] == 'Er':
             data['er_2'] = dopant[1]
+        if dopant[0] == 1 and dopant[2] == 'Tm':
+            data['tm_2'] = dopant[1]
 
     data['radius'] = doc['data']['input']['constraints'][0]['radius']
 
@@ -392,6 +445,14 @@ def append_data_to_csv(doc):
     file_dest = FILE_DEST + file_name + '.csv'
     my_df.to_csv(file_dest, index=False)                 
 
+def update_grid(pool_X, max_idx):
+    if max_idx ==0:
+        pool_X = pool_X[1:]
+    elif max_idx ==(len(pool_X)-1):
+        pool_X = pool_X[:-1]
+    else:
+        pool_X = torch.cat([pool_X[:max_idx], pool_X[max_idx+1:]])    
+    return pool_X
     
 def recommend(train_x, train_y, best_y, bounds, n_trails = 1):
     if isinstance(bounds, list):
@@ -405,19 +466,71 @@ def recommend(train_x, train_y, best_y, bounds, n_trails = 1):
     mll = ExactMarginalLogLikelihood(single_model.likelihood, single_model)
     fit_gpytorch_model(mll)
     
+    # Expected Improvement acquisition function
     EI = qExpectedImprovement(model = single_model, best_f = best_y)
+    # Upper Confidence Bound acquisition function
+    UCB = UpperConfidenceBound(single_model, beta=100)
     
     # hyperparameters are super sensitive here
-    candidates, _ = optimize_acqf(acq_function = EI,
+    candidates, _ = optimize_acqf(acq_function = UCB,
                                  bounds = bounds, 
-                                 q = 1, 
+                                 q = n_trails, 
                                  num_restarts = 20, 
                                  raw_samples = 512, 
-                                 options = {'batch_limit': 5, "maxiter": 200}
+                                # options = {'batch_limit': 5, "maxiter": 200}
                                  )
     
     return candidates
 
+def recommend_discrete(train_x, train_y, discrete_choices, n_trails, inequality_constraints ):
+    single_model = SingleTaskGP(train_x, train_y)
+    mll = ExactMarginalLogLikelihood(single_model.likelihood, single_model)
+    fit_gpytorch_model(mll)
+    
+    # Expected Improvement acquisition function
+    # EI = qExpectedImprovement(model = single_model, best_f = best_y)
+    # Upper Confidence Bound acquisition function
+    UCB = UpperConfidenceBound(single_model, beta=1000)
+    
+    # hyperparameters are super sensitive here
+    candidates, _ = optimize_acqf_discrete_local_search(acq_function = UCB,
+                                                        discrete_choices = discrete_choices,
+                                                        q = n_trails, 
+                                                        inequality_constraints = inequality_constraints ,
+                                                        num_restarts = 20, 
+                                                        raw_samples = 512, 
+                                # options = {'batch_limit': 5, "maxiter": 200}
+                                 )
+    return candidates
+    
+def acq_section(model,test_X, beta):
+    UCB = UpperConfidenceBound(model, beta)
+    ucb = UCB(torch.unsqueeze(test_X,1))
+    max_idx = np.argmax(ucb.detach().numpy())
+    max_ucb = max(ucb.detach().numpy())
+    if max_ucb != ucb.detach().numpy()[max_idx]:
+        print('wrong index')
+    return max_idx, test_X[max_idx]
+
+def recommend_grid_2steps(train_X, train_Y, test_X, pie_size=100000, beta=10000):
+    # split the original pool to sectors that contains 10,000 grids in each sector
+    pies = torch.split(test_X, pie_size)
+    idx_list = []
+    single_model = SingleTaskGP(train_X,train_Y)
+    mll = ExactMarginalLogLikelihood(single_model.likelihood, single_model)
+    fit_gpytorch_model(mll)
+
+    # the candidates from each sector will be saved in 'seleced'
+    selected = torch.empty((0,5))
+    for i,pool_i in enumerate(pies):
+        #print(f'recommending section {i}/{len(pie)} ......')
+        max_idx, max_feature = acq_section(single_model, pool_i, beta)
+        selected = torch.cat((selected,torch.unsqueeze(max_feature,0)),0)
+        idx_list.append(i*pie_size+max_idx)
+
+    # the final round of recommedation from the candidataes in the selected pool
+    max_idx_final, max_feature_final = acq_section(single_model, selected, beta)
+    return torch.unsqueeze(max_feature_final,0), idx_list[max_idx_final]
 
 def thompson_sampling(X, Y, batch_size, n_candidates, sampler="cholesky",  # "cholesky", "ciq", "rff"
     use_keops=False,):
@@ -475,20 +588,48 @@ def run_study():
     DATA_DEST = configs.cfg["data_file"]
     # from_cloud is defined in main() instead of defaults.cfg
     from_cloud = configs.cfg["from_cloud"]
+    #pool_x = pickle.load( open( "../saved_data/NP_pool_small_conc2_radi2_26334375NP_encoded.pkl", "rb" ) )    
+    
+    #check last run status
+    check_last_run()
+    range_radius = np.arange(5,34,2)
+    
+    conc_interval = 0.001
+    range_sum1 = np.linspace(0,1,int(1/conc_interval +1))
+    range_sum2 = np.linspace(0,1,int(1/conc_interval +1))
+
+    yb1 = torch.tensor(range_sum1)
+    er1 = torch.tensor(range_sum1)
+    tm1 = torch.tensor(range_sum1)
+    yb2 = torch.tensor(range_sum2)
+    er2 = torch.tensor(range_sum2)
+    tm2 = torch.tensor(range_sum1)
+    rdi = torch.tensor(range_radius)
+    discrete_choices = [yb1,er1,tm1,yb2,er2,tm2,rdi]
+    constraints = [[torch.Tensor([0,1,2]).long(),torch.Tensor([-1,-1,-1]), -1],[torch.Tensor([3,4,5]).long(),torch.Tensor([-1,-1,-1]), -1]]
+    
     for i in range(max_loops):
         train_x, train_y, best_y = get_data_botorch(DATA_DEST, from_cloud=from_cloud)
         
-        encode_inputs(train_x)
-        # candidates = recommend(train_x, train_y, best_y, bounds)
-        candidates = thompson_sampling(train_x, train_y, 10, 20)
+        #encode_inputs(train_x)
+        #candidates, idx = recommend_grid_2steps(train_x, train_y, pool_x, pie_size=100000, beta=1e4)
+        candidates = recommend_discrete(train_x, train_y, discrete_choices,1, constraints)
+
+        # candidates = thompson_sampling(train_x, train_y, 10, 20)
         print(f"recommending: {candidates}")
-        decode_candidates(candidates)
+        #decode_candidates(candidates)
         print(f"actual recommended recipe: {candidates}")
         
         fw_ids = submit_jobs(candidates)
-        
+        FLAG = [-1]
+        write_flag(FLAG)
         # sample data for a quick test
         # fw_ids = [2738, 2739, 2740, 2741, 2742, 2743, 2744, 2745]
+        log_fws(fw_ids)
+        
+        # update the pool
+        #pool_x = update_grid(pool_x, idx)
+        #pickle.dump(pool_x, open( "../saved_data/NP_pool_small_conc2_radi2_26334375NP_encoded.pkl", "wb" ) )
         
         all_done = monitor(fw_ids)
         print(f"submitted {len(fw_ids)} jobs. sucessfully completed {sum(all_done)}.")
@@ -499,7 +640,8 @@ def run_study():
                 print(f"{fw_id} failed")
 
         get_results(all_done, fw_ids, from_cloud=from_cloud)
-        
+        FLAG = [1]
+        write_flag(FLAG)
     print("all loops done!")
 
     
@@ -510,7 +652,7 @@ def main():
                        help="number of cpus")
     
     parser.add_argument("-c", "--configs", dest="configs",
-                       default="common/defaults.cfg",
+                       default="common/defaults_YbErTm_1e3.cfg",
                        help="Configuration file")
     
     parser.add_argument("-v", "--verbose", dest="verbose",
@@ -530,14 +672,13 @@ def main():
         "config_file": args.configs,
         "ncpu": args.ncpu,
         "timestamp": int(time.time() * 1000),
-        "from_cloud": True
+        "from_cloud": False
     }
     
     # after this call, the config code becomes global which 
     # tries to treat the configs.cfg as a frozen dictionary to avoid accidents.
     configs.cfg = configs.Configuration(fname=args.configs,
                                         defaults=cmdline)
-        
     run_study()
 
     
