@@ -62,4 +62,8 @@ def get_int(doc, spec_range):
 
 def get_qe(doc, total_range, absorption_range):
     x, y = get_spectrum(doc)
-    return emsInteg(x,y,total_range[0], total_range[1])/absInteg(x,y,absorption_range[0], absorption_range[1])
+    if absInteg(x,y,absorption_range[0], absorption_range[1]) == 0:
+        qe =0
+    else:
+        qe = emsInteg(x,y,total_range[0], total_range[1])/absInteg(x,y,absorption_range[0], absorption_range[1])
+    return qe
